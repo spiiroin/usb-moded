@@ -103,7 +103,7 @@ int main (int argc, char **argv)
         int score;
     } power_device_t;
 
-    power_device_t power_dev;
+    power_device_t power_dev = {};
 
     power_dev.score = 0;
 
@@ -132,7 +132,7 @@ int main (int argc, char **argv)
         }
     }
 
-    printf("most likely power supply device = %s\n", power_dev.syspath);
+    printf("most likely power supply device = %s\n", power_dev.syspath ?: "null");
 
     exit(0);
 }
