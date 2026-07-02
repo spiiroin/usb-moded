@@ -31,6 +31,7 @@
 
 #include <unistd.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 /* ========================================================================= *
  * Prototypes
@@ -43,7 +44,10 @@
 static bool  android_write_file       (const char *path, const char *text);
 bool         android_in_use           (void);
 static bool  android_probe            (void);
-gchar       *android_get_serial       (void);
+static gchar *android_read_file       (const char *path);
+static gchar *android_get_serial_from_cmdline(void);
+static gchar *android_get_serial_from_bootconfig(void);
+gchar        *android_get_serial      (void);
 bool         android_init             (void);
 void         android_quit             (void);
 bool         android_set_enabled      (bool enable);
@@ -58,6 +62,7 @@ bool         android_set_attr         (const char *function, const char *attr, c
  * ========================================================================= */
 
 static int android_probed = -1;
+#define CHUNK_SZ 1024
 
 /* ========================================================================= *
  * Functions
@@ -112,10 +117,43 @@ android_probe(void)
     return android_in_use();
 }
 
-/** Read android serial number from kernel command line
- */
-gchar *
-android_get_serial(void)
+static gchar *
+android_read_file(const char *path)
+{
+    LOG_REGISTER_CONTEXT;
+
+    gchar  *data = 0;
+    size_t  used = 0;
+    size_t  size = 0;
+    FILE   *file = 0;
+
+    if( !(file = fopen(path, "r")) ) {
+        log_info("%s: %s: %m", path, "can't open");
+        goto EXIT;
+    }
+
+    for( ;; ) {
+        if( used + CHUNK_SZ + 1 > size ) {
+            size += CHUNK_SZ;
+            data = g_realloc(data, size + 1);
+        }
+        size_t rc = fread(data + used, 1, CHUNK_SZ, file);
+        used += rc;
+        if( rc < CHUNK_SZ )
+            break;
+    }
+
+    data[used] = 0;
+
+EXIT:
+    if( file )
+        fclose(file);
+
+    return data;
+}
+
+static gchar *
+android_get_serial_from_cmdline(void)
 {
     LOG_REGISTER_CONTEXT;
 
@@ -123,42 +161,85 @@ android_get_serial(void)
     static const char find[] = "androidboot.serialno=";
     static const char pbrk[] = " \t\r\n,";
 
-    char   *res  = 0;
-    FILE   *file = 0;
-    size_t  size = 0;
-    char   *data = 0;
+    gchar *res  = 0;
+    gchar *data = 0;
+    char  *beg  = 0;
 
-    if( !(file = fopen(path, "r")) ) {
-        log_warning("%s: %s: %m", path, "can't open");
+    if( !(data = android_read_file(path)) )
         goto EXIT;
-    }
 
-    if( getline(&data, &size, file) < 0 ) {
-        log_warning("%s: %s: %m", path, "can't read");
+    if( !(beg = strstr(data, find)) )
         goto EXIT;
-    }
-
-    char *beg = strstr(data, find);
-    if( !beg ) {
-        log_warning("%s: no serial found", path);
-        goto EXIT;
-    }
 
     beg += sizeof find - 1;
-    size_t len = strcspn(beg, pbrk);
-    if( len < 1 ) {
-        log_warning("%s: empty serial found", path);
-        goto EXIT;
-    }
 
-    res = g_strndup(beg, len);
+    size_t len = strcspn(beg, pbrk);
+    if( len > 0 )
+        res = g_strndup(beg, len);
 
 EXIT:
+    g_free(data);
 
-    free(data);
+    return res;
+}
 
-    if( file )
-        fclose(file);
+static gchar *
+android_get_serial_from_bootconfig(void)
+{
+    LOG_REGISTER_CONTEXT;
+
+    static const char path[] = "/proc/bootconfig";
+    static const char find[] = "androidboot.serialno";
+    static const char pbrk[] = "\" \t\r\n,";
+
+    gchar *res  = 0;
+    gchar *data = 0;
+    char  *beg  = 0;
+
+    if( !(data = android_read_file(path)) )
+        goto EXIT;
+
+    if( !(beg = strstr(data, find)) )
+        goto EXIT;
+
+    beg += sizeof find - 1;
+
+    while( *beg == ' ' || *beg == '\t' )
+        beg++;
+    if( *beg == '=' )
+        beg++;
+    while( *beg == ' ' || *beg == '\t' )
+        beg++;
+    if( *beg == '"' )
+        beg++;
+
+    size_t len = strcspn(beg, pbrk);
+    if( len > 0 )
+        res = g_strndup(beg, len);
+
+EXIT:
+    g_free(data);
+
+    return res;
+}
+
+/** Read android serial number from boot config, overridable via command line
+ */
+gchar *
+android_get_serial(void)
+{
+    LOG_REGISTER_CONTEXT;
+
+    gchar *res = android_get_serial_from_bootconfig();
+
+    gchar *override = android_get_serial_from_cmdline();
+    if( override ) {
+        g_free(res);
+        res = override;
+    }
+
+    if( !res )
+        log_warning("androidboot.serialno not found");
 
     return res;
 }
