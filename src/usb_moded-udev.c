@@ -48,6 +48,7 @@
 #define PROP_ONLINE    "POWER_SUPPLY_ONLINE"
 #define PROP_TYPE      "POWER_SUPPLY_TYPE"
 #define PROP_REAL_TYPE "POWER_SUPPLY_REAL_TYPE"
+#define PROP_USB_TYPE  "POWER_SUPPLY_USB_TYPE"
 // Properties common to both battery and charger devices
 #define PROP_STATUS    "POWER_SUPPLY_STATUS"
 #define PROP_PRESENT   "POWER_SUPPLY_PRESENT"
@@ -60,6 +61,7 @@
  * UTILITY
  * ------------------------------------------------------------------------- */
 
+static gchar               *umudev_parse_list   (const char *list);
 static const char          *umudev_pretty_string(const char *str);
 static bool                 umudev_white_p      (int ch);
 static bool                 umudev_black_p      (int ch);
@@ -180,6 +182,25 @@ static gint  umudev_cable_state_timer_delay = -1;
 /* ========================================================================= *
  * UTILITY
  * ========================================================================= */
+
+static gchar *umudev_parse_list(const char *list)
+{
+    // Input: "Unknown SDP [DCP] CDP" -> Result: "DCP"
+    gchar *item = NULL;
+
+    if( list ) {
+        const char *beg = strchr(list, '[');
+        if( beg ) {
+            const char *end = strchr(++beg, ']');
+            if( end )
+                item = g_strndup(beg, end - beg);
+        }
+        if( !item )
+            item = g_strdup(list);
+    }
+
+    return item;
+}
 
 static const char *umudev_pretty_string(const char *str)
 {
@@ -328,6 +349,7 @@ static void umudev_charger_update_from(struct udev_device *dev)
     /* udev properties we are interested in */
     const char *power_supply_online = 0;
     const char *power_supply_type   = 0;
+    gchar      *usb_type            = 0;
 
     /*
      * Check for present first as some drivers use online for when charging
@@ -337,11 +359,26 @@ static void umudev_charger_update_from(struct udev_device *dev)
     if( !power_supply_online )
         power_supply_online = udev_device_get_property_value(dev, PROP_ONLINE);
 
+    /* At least in Jolla Phone (JP2601) PROP_TYPE can be USB for both PC
+     * connections and while charging from TOH pins. In case PROP_USB_TYPE
+     * exists, it will differentiate these as PC=SDP and charging=DCP.
+     * However, the property value is a list like "Unknown SDP [DCP] CDP",
+     * and we need to extract dynamically allocated copy of the active value.
+     *
+     * Exception: In case of "Unknown" (= no charger connected), decide based
+     * on values of other properties.
+     */
+    usb_type = umudev_parse_list(udev_device_get_property_value(dev, PROP_USB_TYPE));
+
+    if( g_strcmp0(usb_type, "Unknown") )
+        power_supply_type = usb_type;
+
     /* At least h4113 i.e. "Xperia XA2 - Dual SIM" seem to have
      * POWER_SUPPLY_REAL_TYPE udev property with information
      * that usb-moded expects to be in POWER_SUPPLY_TYPE prop.
      */
-    power_supply_type = udev_device_get_property_value(dev, PROP_REAL_TYPE);
+    if( !power_supply_type )
+        power_supply_type = udev_device_get_property_value(dev, PROP_REAL_TYPE);
     if( !power_supply_type )
         power_supply_type = udev_device_get_property_value(dev, PROP_TYPE);
 
@@ -349,6 +386,8 @@ static void umudev_charger_update_from(struct udev_device *dev)
     umudev_charger_set_type(power_supply_type);
 
     umudev_evaluate_state();
+
+    g_free(usb_type);
 }
 
 static int umudev_charger_get_score(struct udev_device *dev)
@@ -1129,7 +1168,9 @@ static void umudev_evaluate_state(void)
               umudev_pretty_string(umudev_extcon_state),
               umudev_pretty_string(umudev_android_state));
 
-    bool connected = !g_strcmp0(charger_online, "1");
+    /* Usually online is either "0" or "1", but some devices
+     * can report e.g. "0" / "2" -> use numerical value > 0 test */
+    bool connected = charger_online && atoi(charger_online) > 0;
 
     /* Unless debug logging has been request via command line,
      * suppress warnings about potential property issues and/or
@@ -1168,15 +1209,20 @@ static void umudev_evaluate_state(void)
             umudev_cable_state_from_udev(CABLE_STATE_PC_CONNECTED);
         }
         else if( !strcmp(charger_type, "USB") ||
+                 !strcmp(charger_type, "SDP") ||
+                 !strcmp(charger_type, "CDP") ||
                  !strcmp(charger_type, "USB_CDP") ) {
             umudev_cable_state_from_udev(CABLE_STATE_PC_CONNECTED);
         }
         else if( !strcmp(charger_type, "USB_DCP") ||
+                 !strcmp(charger_type, "DCP") ||
                  !strcmp(charger_type, "USB_HVDCP") ||
                  !strcmp(charger_type, "USB_HVDCP_3") ) {
             umudev_cable_state_from_udev(CABLE_STATE_CHARGER_CONNECTED);
         }
-        else  if( !strcmp(charger_type, "USB_PD") ) {
+        else  if( !strcmp(charger_type, "USB_PD") ||
+                  !strcmp(charger_type, "PD") ||
+                  !strcmp(charger_type, "PD_PPS") ) {
             /* Looks like it is impossible to tell apart PD connections to
              * pc and chargers based on stable state property values.
              *
@@ -1202,7 +1248,7 @@ static void umudev_evaluate_state(void)
             umudev_cable_state_from_udev(CABLE_STATE_CHARGER_CONNECTED);
         }
         else if( !strcmp(charger_type, "Unknown") ) {
-            log_warning("connection type 'Unknown' reported, assuming disconnected");
+            log_debug("connection type 'Unknown' reported, assuming disconnected");
             umudev_cable_state_from_udev(CABLE_STATE_DISCONNECTED);
         }
         else {
